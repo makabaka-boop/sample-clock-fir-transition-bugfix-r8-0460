@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AudioWorklet 因果 FIR 换参实验</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<label>过渡样本数（0 表示立即）<input id="transitionSamples" type="number" min="0" max="4096" value="0"></label>
+<h1>AudioWorklet 因果 FIR 换参实验</h1>
+<p class="sub">
+  确定性单声道测试信号 · 直接型因果 FIR（≤128 抽头）· 无 ConvolverNode / 无 FFT / 无麦克风。
+  时钟 = 处理器本轮实际处理样本数；暂停只冻结时钟、保留历史；显式重置才换代号并清空。
+</p>
+
+<section class="panel">
+  <h2>1 · 运行控制</h2>
+  <div class="row">
+    <button id="btnStart">开始（新代号）</button>
+    <button id="btnSuspend" disabled>暂停 suspend</button>
+    <button id="btnResume" disabled>恢复 resume</button>
+    <button id="btnReset" disabled>显式重置（新代号并清空）</button>
+    <span id="ctxState" class="state">context: —</span>
+  </div>
+  <div class="row">
+    当前运行代号：<code id="runId">（尚未开始）</code>
+  </div>
+  <div class="row metrics">
+    <span>处理器时钟：<b id="clock">0</b> 样本</span>
+    <span>已回收块：<b id="blockCount">0</b></span>
+    <span>渲染量子：<b id="quantum">—</b></span>
+    <span>采样率：<b id="sampleRate">—</b> Hz</span>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>2 · 完整系数组编辑（1–128 个，逗号或换行分隔）</h2>
+  <textarea id="coeffs" rows="6" spellcheck="false">1, 0, 0, 0, 0, 0, 0, 0</textarea>
+  <div class="row">
+    <span id="coeffInfo" class="dim">—</span>
+    <button id="btnPresetIdentity">直通 [1]</button>
+    <button id="btnPresetAvg">8 点滑动平均</button>
+    <button id="btnPresetComb">16 抽头梳状</button>
+    <button id="btnPresetLong">128 抽头低通窗</button>
+    <button id="btnPresetShort">3 抽头</button>
+  </div>
+  <div class="row">
+    <label>命令序号 seq：<input id="seq" type="number" min="0" step="1" value="1" /></label>
+    <label>目标样本下标 target：<input id="target" type="number" min="0" step="1" value="128" /></label>
+    <button id="btnTargetNow">target = 处理器时钟</button>
+    <button id="btnSend" class="primary" disabled>发送换参指令</button>
+  </div>
+  <p class="dim">
+    指令发出后由处理器按其当前时钟裁决：target 已错过即拒绝（late），不回写已生成样本；
+    同一下标序号较小者拒绝（stale-seq）；旧代号指令拒绝（run-mismatch）。
+  </p>
+</section>
+
+<section class="panel">
+  <h2>3 · 实际捕获（数据全部来自处理器回传块）</h2>
+  <canvas id="plot" width="1200" height="320"></canvas>
+  <div class="row">
+    <label>查看代号：<select id="runSelect"></select></label>
+    <button id="btnDownloadWav" disabled>下载该代号输出 WAV</button>
+    <button id="btnDownloadLog" disabled>下载裁决/生效日志 JSONL</button>
+    <span id="captureInfo" class="dim"></span>
+  </div>
+  <div class="grid2">
+    <div>
+      <h3>裁决回执 ack</h3>
+      <div id="acks" class="log"></div>
+    </div>
+    <div>
+      <h3>实际生效 applied（计算该样本前一次性换组）</h3>
+      <div id="applied" class="log"></div>
+    </div>
+  </div>
+</section>
+
+<script type="module" src="page.js"></script>
+</body>
+</html>

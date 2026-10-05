@@ -1,0 +1,54 @@
+:root {
+  --bg: #0f1418;
+  --panel: #171e25;
+  --ink: #d9e2ec;
+  --dim: #8aa0b4;
+  --line: #2a3744;
+  --accent: #4fc3f7;
+  --ok: #5cd98b;
+  --warn: #ffb74d;
+  --bad: #ef6b6b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 24px;
+  background: var(--bg); color: var(--ink);
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 10px; color: var(--accent); }
+h3 { font-size: 13px; margin: 0 0 6px; color: var(--dim); }
+.sub { color: var(--dim); max-width: 1000px; margin: 0 0 20px; }
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 16px; margin-bottom: 18px;
+}
+.row { display: flex; align-items: center; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
+.metrics span { background: #0d1117; border: 1px solid var(--line); padding: 4px 10px; border-radius: 6px; }
+.metrics b { color: var(--accent); }
+button {
+  background: #202b36; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .4; cursor: not-allowed; }
+button.primary { border-color: var(--accent); color: var(--accent); }
+input[type=number], textarea, select {
+  background: #0d1117; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; font: inherit;
+}
+textarea { width: 100%; resize: vertical; }
+input[type=number] { width: 130px; }
+code { color: var(--accent); }
+.dim { color: var(--dim); }
+.state { padding: 3px 10px; border-radius: 12px; background: #0d1117; border: 1px solid var(--line); }
+canvas { width: 100%; height: 320px; background: #0b0f14; border: 1px solid var(--line); border-radius: 6px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.log {
+  height: 220px; overflow: auto; background: #0b0f14; border: 1px solid var(--line);
+  border-radius: 6px; padding: 8px; font-size: 12px;
+}
+.log .ok { color: var(--ok); }
+.log .bad { color: var(--bad); }
+.log .warn { color: var(--warn); }
+.log .line { padding: 1px 0; border-bottom: 1px dashed #1b2733; }
