@@ -7,7 +7,8 @@ import { KernelTransition } from "./transition.js";
 // - 时钟 clock 只随 processBlock() 实际处理的样本数增长，不存在任何计时器。
 // - 渲染块之间受理指令；目标样本 < 本块起点即“迟到”，明确拒绝，不回写。
 // - 同一目标下标按命令序号 seq 裁决（高者胜）。
-// - 换组在“计算该样本之前”一次性完成，一份输出不会混用两组系数。
+// - 换组在“计算该样本之前”一次性完成；duration>0 时自该样本起按 (k+1)/N
+//   线性过渡（见 transition.js），前后完整组共用同一份输入历史。
 
 export const MAX_TAPS = 128;
 
@@ -35,7 +36,7 @@ export class FirEngine {
     this.coeffs = new Float32Array(0); // 当前生效组（空组 => 输出全 0）
     this._hist = new Float32Array(MAX_TAPS); // 环形输入历史，容量恰好 MAX_TAPS
     this._hpos = 0; // 最新样本所在槽
-    this._pending = new Map(); // target -> { seq, coeffs }
+    this._pending = new Map(); // target -> { seq, coeffs, duration }
     this.events = []; // processBlock 产生的 applied 事件
   }
 
@@ -71,7 +72,8 @@ export class FirEngine {
         return { accepted: false, reason: "stale-seq", at, superseded: null };
       }
       const oldSeq = old.seq;
-      this._pending.set(target, { seq, coeffs: group, duration: old.duration });
+      // 高序号整体替换：系数组与 duration 都属于新命令，旧命令不留任何成分。
+      this._pending.set(target, { seq, coeffs: group, duration });
       return { accepted: true, reason: null, at, superseded: oldSeq };
     }
     this._pending.set(target, { seq, coeffs: group, duration });

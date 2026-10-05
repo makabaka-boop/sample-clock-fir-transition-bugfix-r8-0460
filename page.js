@@ -171,7 +171,7 @@ function onProcessorMessage(msg) {
     const cls = msg.accepted ? "ok" : "bad";
     logLine(
       "acks",
-      `[${msg.runId}] seq=${msg.seq} target=${msg.target} 处理器时钟=${msg.at} => ${tag}` +
+      `[${msg.runId}] seq=${msg.seq} target=${msg.target} duration=${msg.duration ?? 0} 处理器时钟=${msg.at} => ${tag}` +
         (msg.superseded != null ? `（取代 seq=${msg.superseded}）` : ""),
       cls,
     );
@@ -189,7 +189,10 @@ function onProcessorMessage(msg) {
       r.applied.push(ev);
       logLine(
         "applied",
-        `[${msg.runId}] seq=${ev.seq} 在样本 ${ev.at} 计算前一次性换组`,
+        `[${msg.runId}] seq=${ev.seq} 在样本 ${ev.at} 计算前换组` +
+          (ev.duration
+            ? `，自该样本起 ${ev.duration} 样本线性过渡（至 ${ev.at + ev.duration - 1} 完成）`
+            : "（立即）"),
         "ok",
       );
     }
@@ -325,7 +328,11 @@ function redraw() {
     g.stroke();
     g.fillStyle = "#ffb74d";
     g.font = "11px monospace";
-    g.fillText("seq" + ev.seq + "@" + ev.at, Math.min(x + 2, W - 110), 12);
+    g.fillText(
+      "seq" + ev.seq + "@" + ev.at + (ev.duration ? "·" + ev.duration + "样本过渡" : ""),
+      Math.min(x + 2, W - 110),
+      12,
+    );
   }
 
   g.fillStyle = "#9fb6c9";

@@ -78,6 +78,59 @@ function expectedOutput(fs, segs, N) {
   return out;
 }
 
+// 线性过渡的独立参考：每个样本的有效核 = 若干“纯组整段卷积”的加权和
+// （输出交叉淡化表述，与处理器内“逐抽头混合内核”是两条计算路径）。
+// segs: [[target, coeffsArray, duration], ...]（已裁决）。
+function expectedBlendOutput(fs, segs, N) {
+  const convCache = new Map();
+  const convOf = (coeffs) => {
+    const key = coeffs.join(",");
+    let c = convCache.get(key);
+    if (!c) {
+      c = expectedOutput(fs, [[0, coeffs]], N); // 纯组因果卷积，同一输入历史
+      convCache.set(key, c);
+    }
+    return c;
+  };
+  const segMap = new Map(segs.map((s) => [s[0], s]));
+  let weights = new Map(); // key -> { coeffs, weight }
+  let ramp = null;
+  const out = new Float64Array(N);
+  for (let t = 0; t < N; t++) {
+    const cmd = segMap.get(t);
+    if (cmd) {
+      const [, coeffs, duration] = cmd;
+      if (!duration) {
+        weights = new Map([[coeffs.join(","), { coeffs, weight: 1 }]]);
+        ramp = null;
+      } else {
+        ramp = { from: weights, to: coeffs, start: t, duration };
+      }
+    }
+    let eff = weights;
+    if (ramp) {
+      const w = Math.min(1, (t - ramp.start + 1) / ramp.duration);
+      eff = new Map();
+      for (const [k, v] of ramp.from) {
+        const nw = v.weight * (1 - w);
+        if (nw !== 0) eff.set(k, { coeffs: v.coeffs, weight: nw });
+      }
+      const key = ramp.to.join(",");
+      const prev = eff.get(key);
+      eff.set(key, {
+        coeffs: ramp.to,
+        weight: (prev ? prev.weight : 0) + w,
+      });
+      weights = eff;
+      if (w === 1) ramp = null;
+    }
+    let acc = 0;
+    for (const v of eff.values()) acc += v.weight * convOf(v.coeffs)[t];
+    out[t] = acc;
+  }
+  return out;
+}
+
 async function waitFor(
   page,
   fn,
@@ -388,6 +441,122 @@ async function main() {
     check(
       passthroughErr <= 1e-5,
       `resume 后 [${T2},${snap.length}) 直通输出与确定性信号一致（历史未清空，maxErr=${passthroughErr.toExponential(1)}）`,
+    );
+
+    console.log("== 线性过渡：真实捕获与独立参考逐样本一致 ==");
+    // 当前生效组为 [1]（seq=5 @T2）。依次下发：
+    //   seq10 @T3 梳状16，dur700；seq11 @T4=T3+200（落在上一过渡内，重叠）均值8，dur400；
+    //   seq12 @T5 单样本过渡 dur1；seq13/14 同目标 T6：高序号整体替换系数与 duration。
+    const comb16 = new Array(16).fill(0);
+    comb16[0] = 0.7;
+    comb16[15] = 0.3;
+    const avg8 = new Array(8).fill(1 / 8);
+    const coeffsBySeq = new Map([
+      [2, [0.25, 0.25, 0.25, 0.25]],
+      [5, [1]],
+      [10, comb16],
+      [11, avg8],
+      [12, [1]],
+      [13, [0.9]],
+      [14, [0.5, 0.5]],
+    ]);
+    const lenNow2 = (await page.evaluate(() => window.__fir.status())).length;
+    const T3 = lenNow2 + Math.round(fs0 * 2);
+    const T4 = T3 + 200; // 重叠：位于 seq10 的 700 样本过渡内
+    const T5 = T4 + 600; // seq11 的过渡（400 样本）已完成
+    const T6 = T5 + 500;
+    await page.evaluate(
+      ([id, t3, t4, t5, t6, comb, avg]) => {
+        const post = (seq, target, coeffs, duration) =>
+          window.__fir.post({
+            kind: "set",
+            runId: id,
+            seq,
+            target,
+            duration,
+            coeffs: Float32Array.from(coeffs),
+          });
+        post(10, t3, comb, 700);
+        post(11, t4, avg, 400);
+        post(12, t5, [1], 1); // 单样本过渡
+        post(13, t6, [0.9], 900); // 将被同目标高序号整体替换
+        post(14, t6, [0.5, 0.5], 120);
+      },
+      [r1, T3, T4, T5, T6, comb16, avg8],
+    );
+    await waitFor(
+      page,
+      (t6) => {
+        const s = window.__fir.status();
+        return (
+          (s?.applied || []).some((a) => a.target === t6 && a.seq === 14) &&
+          s.length >= t6 + 512
+        );
+      },
+      { timeout: 20000, label: "transition applied@T6+512", arg: T6 },
+    );
+    const snapT = await page.evaluate(() => window.__fir.snapshot());
+    // 生效证据：applied 事件携带的 duration 必须属于各自（胜出的）命令
+    const apOf = (seq) => snapT.applied.find((a) => a.seq === seq);
+    check(
+      apOf(10)?.at === T3 && apOf(10)?.duration === 700,
+      `seq10 在 ${T3} 起 700 样本过渡（applied 带 duration）`,
+    );
+    check(
+      apOf(11)?.at === T4 && apOf(11)?.duration === 400,
+      `seq11 在 ${T4} 起 400 样本重叠过渡`,
+    );
+    check(
+      apOf(12)?.at === T5 && apOf(12)?.duration === 1,
+      `seq12 在 ${T5} 单样本过渡`,
+    );
+    const ack14 = snapT.acks.find((a) => a.seq === 14);
+    check(
+      apOf(14)?.at === T6 &&
+        apOf(14)?.duration === 120 &&
+        ack14?.accepted === true &&
+        ack14?.superseded === 13,
+      `seq14 同目标整体替换：实际过渡时长 120 属于新命令（非旧命令 900），ack 取代 seq=13`,
+    );
+    // 用处理器上报的实际生效事件（target/duration）+ 下发的系数组构建参考，
+    // 与真实捕获逐样本对比：显示/下载同源数据的正确性由处理器输出本身保证。
+    const segs = snapT.applied
+      .map((ev) => [ev.target, coeffsBySeq.get(ev.seq), ev.duration])
+      .sort((a, b) => a[0] - b[0]);
+    check(
+      segs.every((s) => Array.isArray(s[1])),
+      "每条 applied 事件都能对应到已下发的系数组",
+    );
+    const expT = expectedBlendOutput(fs0, segs, snapT.length);
+    const gotT = new Float64Array(snapT.length);
+    for (const b of snapT.blocks)
+      for (let i = 0; i < b.data.length; i++) gotT[b.from + i] = b.data[i];
+    let trErr = 0,
+      trErrAt = -1;
+    for (let t = 0; t < snapT.length; t++) {
+      const e = Math.abs(gotT[t] - Math.fround(expT[t]));
+      if (e > trErr) {
+        trErr = e;
+        trErrAt = t;
+      }
+    }
+    if (trErr > 1e-6) {
+      const diag = {
+        segs,
+        errAt: trErrAt,
+        trErr,
+        applied: snapT.applied,
+        window: Array.from(gotT.subarray(trErrAt - 8, trErrAt + 8)),
+        refWindow: Array.from(expT.subarray(trErrAt - 8, trErrAt + 8)),
+      };
+      fsnode.writeFileSync(
+        "/tmp/fir-transition-mismatch.json",
+        JSON.stringify(diag, null, 1),
+      );
+    }
+    check(
+      trErr <= 1e-6,
+      `含过渡全程真实捕获与独立参考一致（[0,${snapT.length}) maxErr=${trErr.toExponential(2)} @${trErrAt}）`,
     );
 
     console.log("== WAV 下载（内容为实际捕获） ==");
