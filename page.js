@@ -131,12 +131,15 @@ $("btnSend").onclick = () => {
   if (!isValidCoeffGroup(coeffs)) return;
   const seq = Number($("seq").value);
   const target = Number($("target").value);
+  const duration = Number($("transitionSamples").value);
+  // 与处理器同一约束：0..4096 整数（0 = 立即换组，1 = 单样本过渡）。
+  if (!Number.isInteger(duration) || duration < 0 || duration > 4096) return;
   node.port.postMessage({
     kind: "set",
     runId: currentRunId,
     seq,
     target,
-    duration: Number(document.getElementById("transitionSamples").value),
+    duration,
     coeffs: Float32Array.from(coeffs), // 完整系数组
   });
   $("seq").value = String(seq + 1); // 同一下标再发须用更大序号
@@ -171,8 +174,8 @@ function onProcessorMessage(msg) {
     const cls = msg.accepted ? "ok" : "bad";
     logLine(
       "acks",
-      `[${msg.runId}] seq=${msg.seq} target=${msg.target} 处理器时钟=${msg.at} => ${tag}` +
-        (msg.superseded != null ? `（取代 seq=${msg.superseded}）` : ""),
+      `[${msg.runId}] seq=${msg.seq} target=${msg.target} duration=${msg.duration ?? 0} 处理器时钟=${msg.at} => ${tag}` +
+        (msg.superseded != null ? `（取代 seq=${msg.superseded}，系数与时长整体替换）` : ""),
       cls,
     );
     return;
@@ -189,7 +192,9 @@ function onProcessorMessage(msg) {
       r.applied.push(ev);
       logLine(
         "applied",
-        `[${msg.runId}] seq=${ev.seq} 在样本 ${ev.at} 计算前一次性换组`,
+        ev.duration
+          ? `[${msg.runId}] seq=${ev.seq} 在样本 ${ev.at} 计算前起步 ${ev.duration} 样本线性过渡（按本轮样本时钟）`
+          : `[${msg.runId}] seq=${ev.seq} 在样本 ${ev.at} 计算前立即换组`,
         "ok",
       );
     }
@@ -315,7 +320,14 @@ function redraw() {
   g.stroke();
 
   // 换组生效位置竖线（实际生效位置来自处理器 applied 事件，只画窗口内的）
+  // duration>0 的过渡区间用橙色半透明横带标出（起止样本同样来自处理器事件）。
   for (const ev of run.applied) {
+    if (ev.duration) {
+      const x1 = ((ev.at - off0) / N) * W;
+      const x2 = ((ev.at + ev.duration - off0) / N) * W;
+      g.fillStyle = "rgba(255,183,77,0.12)";
+      g.fillRect(Math.max(0, x1), 0, Math.min(W, x2) - Math.max(0, x1), H);
+    }
     if (ev.at < off0) continue;
     const x = ((ev.at - off0) / N) * W;
     g.strokeStyle = "rgba(255,183,77,0.8)";
@@ -325,7 +337,11 @@ function redraw() {
     g.stroke();
     g.fillStyle = "#ffb74d";
     g.font = "11px monospace";
-    g.fillText("seq" + ev.seq + "@" + ev.at, Math.min(x + 2, W - 110), 12);
+    g.fillText(
+      "seq" + ev.seq + "@" + ev.at + (ev.duration ? " N=" + ev.duration : ""),
+      Math.min(x + 2, W - 110),
+      12,
+    );
   }
 
   g.fillStyle = "#9fb6c9";
@@ -402,6 +418,8 @@ $("btnDownloadLog").onclick = () => {
 // 测试钩子（浏览器 E2E 用）：直接发消息 / 读取真实捕获状态。
 window.__fir = {
   post: (m) => node && node.port.postMessage(m),
+  suspend: () => ctx && ctx.suspend(),
+  resume: () => ctx && ctx.resume(),
   runs: () => runs,
   currentRunId: () => currentRunId,
   ctxState: () => (ctx ? ctx.state : null),

@@ -7,7 +7,6 @@
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-<label>过渡样本数（0 表示立即）<input id="transitionSamples" type="number" min="0" max="4096" value="0"></label>
 <h1>AudioWorklet 因果 FIR 换参实验</h1>
 <p class="sub">
   确定性单声道测试信号 · 直接型因果 FIR（≤128 抽头）· 无 ConvolverNode / 无 FFT / 无麦克风。
@@ -48,12 +47,15 @@
   <div class="row">
     <label>命令序号 seq：<input id="seq" type="number" min="0" step="1" value="1" /></label>
     <label>目标样本下标 target：<input id="target" type="number" min="0" step="1" value="128" /></label>
+    <label>过渡样本数 duration（0=立即，1=单样本，最大 4096）：<input id="transitionSamples" type="number" min="0" max="4096" step="1" value="0" /></label>
     <button id="btnTargetNow">target = 处理器时钟</button>
     <button id="btnSend" class="primary" disabled>发送换参指令</button>
   </div>
   <p class="dim">
     指令发出后由处理器按其当前时钟裁决：target 已错过即拒绝（late），不回写已生成样本；
-    同一下标序号较小者拒绝（stale-seq）；旧代号指令拒绝（run-mismatch）。
+    同一下标序号较小者拒绝（stale-seq），高序号命令整体替换系数<b>与过渡时长</b>；旧代号指令拒绝（run-mismatch）。
+    duration=N&gt;0 时自目标样本起用 (k+1)/N 权重混合前后完整系数组（长度差按零补齐、共用同一输入历史），
+    过渡严格按本轮样本时钟推进；过渡完成前再下发同目标命令，新命令整体接管。
   </p>
 </section>
 
@@ -72,7 +74,7 @@
       <div id="acks" class="log"></div>
     </div>
     <div>
-      <h3>实际生效 applied（计算该样本前一次性换组）</h3>
+      <h3>实际生效 applied（计算该样本前换组；duration&gt;0 为线性过渡）</h3>
       <div id="applied" class="log"></div>
     </div>
   </div>

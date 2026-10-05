@@ -6,8 +6,10 @@ import { KernelTransition } from "./transition.js";
 // - 系数最多 MAX_TAPS 个；每次换参下发完整系数组。
 // - 时钟 clock 只随 processBlock() 实际处理的样本数增长，不存在任何计时器。
 // - 渲染块之间受理指令；目标样本 < 本块起点即“迟到”，明确拒绝，不回写。
-// - 同一目标下标按命令序号 seq 裁决（高者胜）。
-// - 换组在“计算该样本之前”一次性完成，一份输出不会混用两组系数。
+// - 同一目标下标按命令序号 seq 裁决（高者胜），裁决同时整体替换系数与过渡时长。
+// - 换组在“计算该样本之前”一次性完成；duration>0 时自该样本起按本轮样本时钟
+//   做 N 样本线性过渡，过渡推进只取决于实际处理的样本数（与分块方式无关）。
+// - 重叠过渡承接上一已生成样本的有效系数；重置（新 KernelTransition）清除过渡。
 
 export const MAX_TAPS = 128;
 
@@ -71,7 +73,8 @@ export class FirEngine {
         return { accepted: false, reason: "stale-seq", at, superseded: null };
       }
       const oldSeq = old.seq;
-      this._pending.set(target, { seq, coeffs: group, duration: old.duration });
+      // 同目标裁决同时约束系数与过渡时长：整体替换为新命令。
+      this._pending.set(target, { seq, coeffs: group, duration });
       return { accepted: true, reason: null, at, superseded: oldSeq };
     }
     this._pending.set(target, { seq, coeffs: group, duration });

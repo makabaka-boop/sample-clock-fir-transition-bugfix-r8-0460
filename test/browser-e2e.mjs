@@ -60,15 +60,46 @@ function check(cond, msg) {
 const failures = [];
 
 // 按“生效区间”在 Node 端独立复算预期输出（逐样本参考卷积）。
-// segs: [[target, coeffsArray], ...]
+// segs: [[target, coeffsArray, duration?], ...]；duration 缺省/0 立即换组，
+// N>0 时自 target 起按本轮样本时钟 (q/N) 逐抽头线性混合，零补齐，重叠承接有效状态。
 function expectedOutput(fs, segs, N) {
   const out = new Float64Array(N);
-  let b = new Float64Array(0);
-  const map = new Map(segs.map((s) => [s[0], s[1]]));
+  let current = new Float64Array(0);
+  let ramp = null;
+  const map = new Map(segs.map((s) => [s[0], s]));
   const hist = new Float64Array(128);
   let hp = 0;
   for (let t = 0; t < N; t++) {
-    if (map.has(t)) b = Float64Array.from(map.get(t));
+    const s = map.get(t);
+    if (s) {
+      // 系数经 postMessage(Float32Array) 传输：参考侧同样量化到 f32，与处理器同运算序。
+      const to = Float64Array.from(s[1]).map((v) => f32(v));
+      const duration = s[2] ?? 0;
+      if (!duration) {
+        current = to;
+        ramp = null;
+      } else {
+        ramp = { from: Float64Array.from(current), to, start: t, duration };
+      }
+    }
+    let b = current;
+    if (ramp) {
+      const q = t - ramp.start + 1;
+      const w = Math.min(1, q / ramp.duration);
+      const L = Math.max(ramp.from.length, ramp.to.length);
+      const mix = new Float64Array(L);
+      for (let k = 0; k < L; k++) {
+        const a = k < ramp.from.length ? ramp.from[k] : 0;
+        const bb = k < ramp.to.length ? ramp.to[k] : 0;
+        mix[k] = a + (bb - a) * w;
+      }
+      current = mix;
+      b = mix;
+      if (w === 1) {
+        current = ramp.to;
+        ramp = null;
+      }
+    }
     hp = (hp + 1) % 128;
     hist[hp] = f32(signal(t, fs));
     let acc = 0;
@@ -389,6 +420,200 @@ async function main() {
       passthroughErr <= 1e-5,
       `resume 后 [${T2},${snap.length}) 直通输出与确定性信号一致（历史未清空，maxErr=${passthroughErr.toExponential(1)}）`,
     );
+
+    console.log("== 线性过渡（真实 worklet：多抽头/长度变化/重叠/单样本/暂停跨过渡） ==");
+    {
+      const st0 = await page.evaluate(() => window.__fir.status());
+      const base = st0.length;
+      // 预留余量：真实音频时钟持续运行，命令受理与轮询有延迟。
+      const TA = base + Math.round(fs0 * 2);
+      const TB = TA + 1500; // 与 TA 同目标无关；这里是独立目标
+      const TC = TA + 700; // 落在 ramp A（800 样本）中段 => 重叠过渡
+      const TD = TA + 2600; // 单样本过渡
+      const TE = TA + 3300; // 暂停将发生在这条 ramp 的中段
+      const avg16 = new Array(16).fill(1 / 16);
+      const longWin = (() => {
+        const c = new Array(128);
+        for (let i = 0; i < 128; i++)
+          c[i] = ((0.5 - 0.5 * Math.cos((2 * Math.PI * i) / 127)) / 128) * 2;
+        return c;
+      })();
+      await page.evaluate(
+        (arg) => {
+          const {
+            id, TA, TB, TC, TD, TE, avg16, longWin,
+          } = arg;
+          const post = (seq, target, coeffs, duration, label) =>
+            window.__fir.post({
+              kind: "set", runId: id, seq, target, duration,
+              coeffs: Float32Array.from(coeffs),
+            });
+          // ramp A：直通 -> 16 抽头平均，800 样本
+          post(10, TA, avg16, 800);
+          // 同目标 TA：seq=11 更高序号先裁决（即便 duration 不同也接纳并取代 10），
+          // seq=12 再裁决 11（重复序号的拒绝回归在核心测试，这里验证链路：最终时长=800）
+          post(11, TA, [0.9], 1);
+          post(12, TA, avg16, 800);
+          // seq=12 已胜出：再发同序号（哪怕 duration 不同）必须 stale-seq 拒绝
+          post(12, TA, [0.5, 0.5], 3);
+          // 同目标 TB：seq=20 用长窗+超长 duration，seq=21 以短窗+短 duration 裁决 =>
+          // 实际系数与过渡时长都必须属于 seq=21（“时长属于旧命令”回归点）
+          post(20, TB, longWin, 4000);
+          post(21, TB, [0.2, 0.2, 0.2, 0.2, 0.2], 128);
+          // ramp C：重叠（ramp A 未完成）-> 128 抽头窗，300 样本
+          post(30, TC, longWin, 300);
+          // 单样本过渡：128 抽头 -> 3 抽头
+          post(40, TD, [0.3, 0.4, 0.3], 1);
+          // 暂停跨过渡：3 抽头 -> 直通，2000 样本（暂停点落在其中）
+          post(50, TE, [1], 4096);
+          // 非法 duration：必须 bad-duration 拒绝（不影响任何输出）
+          post(60, TB + 5000, [1], 4097);
+        },
+        {
+          id: r1, TA, TB, TC, TD, TE,
+          avg16, longWin,
+        },
+      );
+
+      // 4096 是协议上限（约 93ms）；Playwright 点击的往返延迟可能就接近这个值，
+      // 故在页面内装一个 4ms 轮询的“武装器”：一旦本轮时钟进入 ramp E
+      // 就直接调 ctx.suspend()（无点击往返），冻结点仍应落在 4096 样本区间内。
+      const armAt = TE - Math.round(fs0 * 0.2);
+      await waitFor(
+        page,
+        (arm) => (window.__fir.status()?.length || 0) >= arm,
+        { timeout: 20000, label: "ramp-E-armed", arg: armAt },
+      );
+      await page.evaluate(
+        (te) =>
+          new Promise((resolve) => {
+            const timer = setInterval(() => {
+              if ((window.__fir.status()?.length || 0) >= te) {
+                clearInterval(timer);
+                Promise.resolve(window.__fir.suspend()).then(resolve);
+              }
+            }, 4);
+          }),
+        TE,
+      );
+      await waitFor(page, () => window.__fir.ctxState() === "suspended", {
+        label: "suspended-in-ramp",
+      });
+      await new Promise((r) => setTimeout(r, 500));
+      const pausedLenRamp = (await page.evaluate(() => window.__fir.status()))
+        .length;
+      await new Promise((r) => setTimeout(r, 400));
+      const pausedLenRamp2 = (await page.evaluate(() => window.__fir.status()))
+        .length;
+      check(
+        pausedLenRamp2 === pausedLenRamp &&
+          pausedLenRamp >= TE &&
+          pausedLenRamp < TE + 4096,
+        `过渡中暂停：本轮样本时钟冻结在 ${pausedLenRamp}（ramp E 区间 [${TE}, ${TE + 4096}) 内）`,
+      );
+      await page.evaluate(() => window.__fir.resume());
+
+      // 等到 ramp E 结束后再多收 1500 样本
+      await waitFor(
+        page,
+        (endE) => (window.__fir.status()?.length || 0) >= endE,
+        { timeout: 20000, label: "all-ramps-done", arg: TE + 4096 + 1500 },
+      );
+      snap = await page.evaluate(() => window.__fir.snapshot());
+
+      // 裁决链路（限定当前代号，避免与前序阶段的同序号指令混淆）
+      const aTA = snap.acks.filter(
+        (a) => a.runId === r1 && a.target === TA && a.seq >= 10,
+      );
+      check(
+        aTA.find((a) => a.seq === 10)?.accepted === true &&
+          aTA.find((a) => a.seq === 11)?.accepted === true &&
+          aTA.find((a) => a.seq === 11)?.superseded === 10 &&
+          aTA.find((a) => a.seq === 12)?.accepted === true &&
+          aTA.find((a) => a.seq === 12)?.superseded === 11,
+        "过渡指令同目标序号裁决：高序号（携带不同 duration）依次整体取代低序号",
+      );
+      const aTAStale = aTA.filter(
+        (a) => a.seq === 12 && a.accepted === false,
+      );
+      check(
+        aTAStale.length === 1 && aTAStale[0].reason === "stale-seq",
+        "同目标重复序号（duration 也不同）仍判 stale-seq 拒绝",
+      );
+      const aTB = snap.acks.filter((a) => a.runId === r1 && a.target === TB);
+      check(
+        aTB.find((a) => a.seq === 20)?.accepted === true &&
+          aTB.find((a) => a.seq === 21)?.accepted === true &&
+          aTB.find((a) => a.seq === 21)?.superseded === 20,
+        "TB：seq=21 裁决 seq=20（系数与过渡时长整体替换）",
+      );
+      const aBad = snap.acks.find((a) => a.runId === r1 && a.seq === 60);
+      check(
+        aBad?.accepted === false && aBad.reason === "bad-duration",
+        "duration=4097 被处理器拒绝（bad-duration）",
+      );
+
+      // applied 事件：时长属于胜出命令
+      const ap = (seq) => snap.applied.find((a) => a.seq === seq);
+      check(
+        ap(12)?.at === TA && ap(12)?.duration === 800,
+        `applied@${TA} duration=800（事件携带时长）`,
+      );
+      check(
+        ap(21)?.at === TB && ap(21)?.duration === 128,
+        `applied@${TB} duration=128——实际过渡时长属于新高序号命令而非旧命令的 4000`,
+      );
+      check(
+        ap(30)?.at === TC && ap(30)?.duration === 300,
+        `重叠过渡 applied@${TC} duration=300`,
+      );
+      check(ap(40)?.at === TD && ap(40)?.duration === 1, "单样本过渡 applied duration=1");
+      check(ap(50)?.at === TE && ap(50)?.duration === 4096, `applied@${TE} duration=4096`);
+
+      // 逐样本对拍：把所有段（含前序直通段 T2、T）交给同一参考模型复算整段捕获。
+      const fs = snap.fs;
+      const refSegs = [
+        [T, [0.25, 0.25, 0.25, 0.25]],
+        [T2, [1]],
+        [TA, avg16, 800],
+        [TB, [0.2, 0.2, 0.2, 0.2, 0.2], 128],
+        [TC, longWin, 300],
+        [TD, [0.3, 0.4, 0.3], 1],
+        [TE, [1], 4096],
+      ];
+      const expectedRamp = expectedOutput(fs, refSegs, snap.length);
+      const gotRamp = new Float64Array(snap.length);
+      for (const b of snap.blocks)
+        for (let i = 0; i < b.data.length; i++)
+          gotRamp[b.from + i] = b.data[i];
+      let rampErr = 0,
+        rampErrAt = -1;
+      for (let t = TA; t < snap.length; t++) {
+        const e = Math.abs(gotRamp[t] - Math.fround(expectedRamp[t]));
+        if (e > rampErr) {
+          rampErr = e;
+          rampErrAt = t;
+        }
+      }
+      check(
+        rampErr <= 1e-5,
+        `过渡全段真实 worklet 输出与逐样本参考一致（[${TA},${snap.length}) maxErr=${rampErr.toExponential(2)} @${rampErrAt}）`,
+      );
+      // 关键边界直接验证
+      check(
+        Math.abs(gotRamp[TD] - Math.fround(expectedRamp[TD])) <= 1e-5 &&
+          Math.abs(gotRamp[TD + 1] - Math.fround(expectedRamp[TD + 1])) <= 1e-5,
+        "单样本过渡：仅 TD 一个样本混合，TD+1 已是目标组",
+      );
+      // ramp E 之后为直通：输出逐样本等于确定性信号（暂停跨过渡，历史/进度连续）
+      let afterErr = 0;
+      for (let t = TE + 4096; t < snap.length; t++)
+        afterErr = Math.max(afterErr, Math.abs(gotRamp[t] - f32(signal(t, fs))));
+      check(
+        afterErr <= 1e-5,
+        `暂停跨过渡恢复后，ramp E 终点起直通与确定性信号一致（maxErr=${afterErr.toExponential(1)}）`,
+      );
+    }
 
     console.log("== WAV 下载（内容为实际捕获） ==");
     // 先挂起上下文让块流静止，保证“下载文件”与“随后读取的处理器回传数据”严格同源

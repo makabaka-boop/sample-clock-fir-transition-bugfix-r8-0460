@@ -4,7 +4,7 @@
 //
 // 消息（主线程 -> 处理器）：
 //   { kind: 'start', runId }                      开始新代号（清空时钟/历史/待生效队列）
-//   { kind: 'set', runId, seq, target, coeffs }   换参指令（完整系数组，<=128）
+//   { kind: 'set', runId, seq, target, coeffs, duration } 换参指令（完整系数组，<=128；duration 0..4096）
 //   { kind: 'reset', runId }                      显式重置 -> 新代号并清空
 //
 // 回传（处理器 -> 主线程）：
@@ -66,6 +66,7 @@ class FirProcessor extends AudioWorkletProcessor {
         runId: msg.runId,
         seq: msg.seq,
         target: msg.target,
+        duration: msg.duration ?? 0,
         accepted: verdict.accepted,
         reason: verdict.reason,
         at: verdict.at, // 处理器收到指令时本轮时钟（已实际处理样本数）
